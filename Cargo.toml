@@ -30,7 +30,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # rustls is named ONLY so a TLS failure can be recognised by TYPE while
 # walking reqwest's error chain — never to configure TLS by hand.
 rustls = { version = "0.23", default-features = false }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "time"] }
+# `net` is for exactly one thing: the bounded plain-TCP probe that turns a
+# connect-class failure into evidence (`transport::ConnectEvidence`).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "time", "net"] }
 url = "2"
 # `Bytes::from_owner` (1.9+): a secret crosses into the HTTP stack as a
 # buffer whose zeroizing owner is dropped with the last reference.

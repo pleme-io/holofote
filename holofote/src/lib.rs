@@ -60,5 +60,5 @@ pub use spl::{Search, SearchRequest, SortRequest, TermRequest};
 pub use tls::TlsPosture;
 #[cfg(any(test, feature = "mock"))]
 pub use transport::MockTransport;
-pub use transport::{ReqwestTransport, Transport};
+pub use transport::{ConnectEvidence, ReqwestTransport, Transport};
 pub use version::ServerVersion;

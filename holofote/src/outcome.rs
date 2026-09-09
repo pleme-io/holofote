@@ -384,6 +384,7 @@ mod tests {
             source: TransportError::Connect {
                 host: "splunk-a.example.com".into(),
                 detail: "connection refused".into(),
+                evidence: crate::transport::ConnectEvidence::Unprobed,
             },
         })
         .into();

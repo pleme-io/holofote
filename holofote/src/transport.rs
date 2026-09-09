@@ -5,21 +5,41 @@
 //! the single re-login, the job lifecycle, the version-derived route — is
 //! exercised against [`MockTransport`] with zero network. The real
 //! [`ReqwestTransport`] owns exactly three concerns: turning a [`Route`]
-//! into a URL, honouring the [`TlsPosture`], and classifying a failure by
-//! **type** (a `rustls::Error` found in the error chain is a TLS failure;
-//! `is_connect()` / `is_timeout()` are reachability) so the client can say
-//! *why* it was blind without matching on English prose.
+//! into a URL, honouring the [`TlsPosture`], and classifying a failure so
+//! the client can say *why* it was blind without matching on English prose.
+//!
+//! Classification is by **type first** — a `rustls::Error` found in the
+//! error chain is a TLS failure; `is_connect()` / `is_timeout()` are
+//! reachability — and that is necessary but not sufficient. Measured
+//! 2026-09-09 (reqwest 0.12.28, rustls 0.23.44, hyper-rustls 0.27.9)
+//! against a host presenting a self-signed certificate under
+//! [`TlsPosture::System`]: the rustls handshake ran past the connect
+//! timeout (Python's `ssl` rejects the same certificate in 2.5 s), and the
+//! chain that came back was `error sending request for url` →
+//! `client error (Connect)` → `operation timed out` — `is_connect()` true,
+//! `is_timeout()` true or false from one run to the next, and **no
+//! `rustls::Error` anywhere in it**. That chain is byte-for-byte the one a
+//! filtered port produces, so by type alone a bad certificate read as a
+//! VPN that is down. Hence a second source: after a connect-class failure
+//! that no rustls error explains, one bounded plain-TCP connect to the
+//! same host and port, on the same connect budget ([`ConnectEvidence`]).
+//! TCP opening inside that budget puts the failure past TCP — in the
+//! handshake or just after; TCP failing too puts it on the network. The
+//! decision over shape + evidence + posture is the pure [`classify_with`],
+//! driven by a table with no `reqwest::Error` in it.
 
 #[cfg(any(test, feature = "mock"))]
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::future::Future;
+use std::net::SocketAddr;
 use std::pin::Pin;
 #[cfg(any(test, feature = "mock"))]
 use std::sync::Mutex;
 use std::time::Duration;
 
 use bytes::Bytes;
+use tokio::net::TcpStream;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::auth::{AuthHeader, LEGAL_CREDENTIAL_FORMS};
@@ -153,18 +173,69 @@ impl HttpResponse {
     }
 }
 
+/// What a bounded plain-TCP connect to the base URL's host and port found,
+/// after a connect-class failure that no `rustls::Error` explained. Typed,
+/// so the classifier decides on it and the message renders from it — the
+/// words are written once, below, never assembled at the failure site.
+///
+/// `Display` is the parenthetical that follows the error's own words:
+/// nothing for [`Unprobed`](Self::Unprobed), otherwise a leading space and
+/// the finding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectEvidence {
+    /// No probe ran: the failure was not connect-class, a rustls error had
+    /// already explained it, or the base URL names no host or known port.
+    Unprobed,
+    /// A plain TCP connection opened within the connect timeout, so the
+    /// failure is past TCP — in the TLS handshake or just after.
+    TcpOpens {
+        /// The host as configured.
+        host: String,
+        /// The port probed — the base URL's, or the scheme's default.
+        port: u16,
+    },
+    /// A plain TCP connection also failed within the connect timeout —
+    /// refused, unroutable, or out of time, which is what a filtered port
+    /// (a host behind a VPN that is down) looks like.
+    TcpClosed {
+        /// The host as configured.
+        host: String,
+        /// The port probed — the base URL's, or the scheme's default.
+        port: u16,
+    },
+}
+
+impl fmt::Display for ConnectEvidence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unprobed => Ok(()),
+            Self::TcpOpens { host, port } => write!(
+                f,
+                " (a plain TCP connection to {host}:{port} opens within the connect timeout, so the failure is past TCP — in the TLS handshake or just after)"
+            ),
+            Self::TcpClosed { host, port } => write!(
+                f,
+                " (a plain TCP connection to {host}:{port} also fails within the connect timeout)"
+            ),
+        }
+    }
+}
+
 /// Why no response came back at all. Each arm is a different remedy, and
 /// the client renders each as a different `blind`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TransportError {
     /// The host could not be reached — refused, unroutable, or the connect
-    /// timed out. The usual cause is a VPN that is not up.
-    #[error("could not connect to {host}: {detail}")]
+    /// timed out — and, when it was probed, a plain TCP connection fails
+    /// too. The usual cause is a VPN that is not up.
+    #[error("could not connect to {host}: {detail}{evidence}")]
     Connect {
         /// The host as configured.
         host: String,
         /// The OS / client's own words.
         detail: String,
+        /// What the plain-TCP probe found, if one ran.
+        evidence: ConnectEvidence,
     },
     /// The host was reached but did not answer within the request timeout.
     #[error("{host} did not answer within the request timeout: {detail}")]
@@ -175,21 +246,30 @@ pub enum TransportError {
         detail: String,
     },
     /// The TLS handshake failed — a certificate the current posture does
-    /// not trust.
-    #[error("TLS handshake with {host} failed: {detail}")]
+    /// not trust. Recognised by type (a `rustls::Error` in the chain) or by
+    /// evidence (a connect-class failure while plain TCP opens).
+    #[error("TLS handshake with {host} failed: {detail}{evidence}")]
     Tls {
         /// The host as configured.
         host: String,
-        /// rustls's own words.
+        /// rustls's own words — or, when recognised by evidence, the
+        /// client's.
         detail: String,
+        /// What the plain-TCP probe found, if one ran.
+        evidence: ConnectEvidence,
     },
-    /// Anything else the client could not classify.
-    #[error("request to {host} failed: {detail}")]
+    /// Anything else the client could not classify — including a
+    /// connect-class failure under [`TlsPosture::AcceptAny`] while plain TCP
+    /// opens, where a certificate cannot be the cause and the VPN is ruled
+    /// out by the evidence.
+    #[error("request to {host} failed: {detail}{evidence}")]
     Other {
         /// The host as configured.
         host: String,
         /// The client's own words.
         detail: String,
+        /// What the plain-TCP probe found, if one ran.
+        evidence: ConnectEvidence,
     },
     /// Only the mock produces this: a request no test scripted.
     #[error("no scripted response for {method} {route}")]
@@ -267,11 +347,45 @@ pub enum TransportBuildError {
     CredentialInUrl,
 }
 
+/// The base URL's host and port, as the probe dials them. Kept as a
+/// `url::Host` so a bracketed IPv6 literal is dialled as an address rather
+/// than looked up as a name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProbeTarget {
+    host: url::Host<String>,
+    port: u16,
+}
+
+impl ProbeTarget {
+    /// `None` when the URL names no host, or no port and a scheme with no
+    /// known default — then no probe can be made.
+    fn of(base: &url::Url) -> Option<Self> {
+        Some(Self {
+            host: base.host()?.to_owned(),
+            port: base.port_or_known_default()?,
+        })
+    }
+
+    async fn connect(&self) -> std::io::Result<TcpStream> {
+        match &self.host {
+            url::Host::Domain(name) => TcpStream::connect((name.as_str(), self.port)).await,
+            url::Host::Ipv4(addr) => TcpStream::connect(SocketAddr::from((*addr, self.port))).await,
+            url::Host::Ipv6(addr) => TcpStream::connect(SocketAddr::from((*addr, self.port))).await,
+        }
+    }
+}
+
 /// The production transport: reqwest over rustls.
 pub struct ReqwestTransport {
     client: reqwest::Client,
     base: url::Url,
     host: String,
+    /// Where a connect-class failure is probed, when the base URL says.
+    target: Option<ProbeTarget>,
+    /// The probe's budget — the same one the failed connect had.
+    connect_timeout: Duration,
+    /// Decides what "TCP opens but the request failed" means.
+    posture: TlsPosture,
 }
 
 impl ReqwestTransport {
@@ -315,7 +429,15 @@ impl ReqwestTransport {
             detail: e.to_string(),
         })?;
         let host = base.host_str().unwrap_or_default().to_owned();
-        Ok(Self { client, base, host })
+        let target = ProbeTarget::of(&base);
+        Ok(Self {
+            client,
+            base,
+            host,
+            target,
+            connect_timeout: timeouts.connect,
+            posture: tls.clone(),
+        })
     }
 
     fn url_for(&self, req: &HttpRequest) -> url::Url {
@@ -329,24 +451,138 @@ impl ReqwestTransport {
         url
     }
 
-    fn classify(&self, e: &reqwest::Error) -> TransportError {
+    /// The evidence: one bounded plain-TCP connect to the base URL's host
+    /// and port, on the same budget the failed connect had. Nothing is
+    /// sent. A socket that opens puts the failure past TCP; one that does
+    /// not — refused, unroutable, or out of time, which is what a filtered
+    /// port looks like — puts it on the network. No host or no known port
+    /// means no probe can be made, and that is `Unprobed`, never a guess.
+    async fn probe(&self) -> ConnectEvidence {
+        let Some(target) = &self.target else {
+            return ConnectEvidence::Unprobed;
+        };
         let host = self.host.clone();
-        let detail = e.to_string();
-        if chain_holds_tls_error(e) {
-            TransportError::Tls { host, detail }
-        } else if e.is_timeout() {
-            TransportError::Timeout { host, detail }
-        } else if e.is_connect() {
-            TransportError::Connect { host, detail }
-        } else {
-            TransportError::Other { host, detail }
+        let port = target.port;
+        match tokio::time::timeout(self.connect_timeout, target.connect()).await {
+            Ok(Ok(_)) => ConnectEvidence::TcpOpens { host, port },
+            Ok(Err(_)) | Err(_) => ConnectEvidence::TcpClosed { host, port },
         }
+    }
+
+    /// Read the error's typed shape, gather evidence when the shape asks
+    /// for it, and decide. The decision itself is [`classify_with`].
+    async fn classify(&self, e: &reqwest::Error) -> TransportError {
+        let shape = ErrorShape::from(e);
+        let evidence = if shape.wants_probe() {
+            self.probe().await
+        } else {
+            ConnectEvidence::Unprobed
+        };
+        classify_with(&self.host, &self.posture, shape, evidence, &e.to_string())
+    }
+}
+
+/// The three typed facts the classifier reads off a `reqwest::Error`,
+/// lifted out so the decision is a function of plain values and a table
+/// can drive it — a `reqwest::Error` cannot be made without I/O.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ErrorShape {
+    /// A `rustls::Error` sits somewhere in the `source()` chain
+    /// ([`chain_holds_tls_error`]).
+    pub tls_in_chain: bool,
+    /// `reqwest::Error::is_connect()`.
+    pub is_connect: bool,
+    /// `reqwest::Error::is_timeout()`.
+    pub is_timeout: bool,
+}
+
+impl ErrorShape {
+    /// Whether the probe has anything to add: a connect-class failure that
+    /// no rustls error already explains.
+    #[must_use]
+    pub const fn wants_probe(self) -> bool {
+        self.is_connect && !self.tls_in_chain
+    }
+}
+
+impl From<&reqwest::Error> for ErrorShape {
+    fn from(e: &reqwest::Error) -> Self {
+        Self {
+            tls_in_chain: chain_holds_tls_error(e),
+            is_connect: e.is_connect(),
+            is_timeout: e.is_timeout(),
+        }
+    }
+}
+
+/// The decision, with nothing to await: a function of the error's typed
+/// shape, what the probe found, and the posture in force.
+///
+/// Precedence: TLS by type; then connect-class — a connect timeout IS a
+/// connect failure, so this comes before `is_timeout`, which would
+/// otherwise read a filtered port as "the host is reachable, the call was
+/// slow"; then a request that outran its budget; then everything else.
+///
+/// On a connect-class failure the evidence decides. TCP opening under
+/// [`TlsPosture::System`] / [`TlsPosture::Ca`] leaves the certificate as
+/// the likeliest cause, and the posture's remedy applies: `Tls`. TCP
+/// opening under [`TlsPosture::AcceptAny`] rules the certificate out, so
+/// it is `Other`, carrying the evidence — and never the VPN message. TCP
+/// failing too, or no probe, is `Connect`.
+#[must_use]
+pub fn classify_with(
+    host: &str,
+    posture: &TlsPosture,
+    shape: ErrorShape,
+    evidence: ConnectEvidence,
+    detail: &str,
+) -> TransportError {
+    let host = host.to_owned();
+    let detail = detail.to_owned();
+    if shape.tls_in_chain {
+        return TransportError::Tls {
+            host,
+            detail,
+            evidence,
+        };
+    }
+    if shape.is_connect {
+        return match (&evidence, posture) {
+            (ConnectEvidence::TcpOpens { .. }, TlsPosture::System | TlsPosture::Ca(_)) => {
+                TransportError::Tls {
+                    host,
+                    detail,
+                    evidence,
+                }
+            }
+            (ConnectEvidence::TcpOpens { .. }, TlsPosture::AcceptAny) => TransportError::Other {
+                host,
+                detail,
+                evidence,
+            },
+            (ConnectEvidence::TcpClosed { .. } | ConnectEvidence::Unprobed, _) => {
+                TransportError::Connect {
+                    host,
+                    detail,
+                    evidence,
+                }
+            }
+        };
+    }
+    if shape.is_timeout {
+        return TransportError::Timeout { host, detail };
+    }
+    TransportError::Other {
+        host,
+        detail,
+        evidence,
     }
 }
 
 /// Walk an error's `source()` chain looking for a `rustls::Error` — either
 /// directly or wrapped in an `io::Error`, which is how `tokio-rustls`
-/// surfaces it. Typed, not a string match.
+/// surfaces it. Typed, not a string match. Necessary, not sufficient: see
+/// the module doc for the measured chain that carries none.
 pub fn chain_holds_tls_error(root: &(dyn std::error::Error + 'static)) -> bool {
     let mut cursor: Option<&(dyn std::error::Error + 'static)> = Some(root);
     while let Some(err) = cursor {
@@ -383,6 +619,7 @@ impl Transport for ReqwestTransport {
                         .map_err(|e| TransportError::Other {
                             host: self.host.clone(),
                             detail: e.to_string(),
+                            evidence: ConnectEvidence::Unprobed,
                         })?;
                 // Marks the value so reqwest/hyper debug output redacts it.
                 value.set_sensitive(true);
@@ -408,18 +645,20 @@ impl Transport for ReqwestTransport {
                     )
                     .body(zeroizing_bytes(encoded));
             }
-            let response = builder.send().await.map_err(|e| self.classify(&e))?;
+            let response = match builder.send().await {
+                Ok(response) => response,
+                Err(e) => return Err(self.classify(&e).await),
+            };
             let status = response.status().as_u16();
             let retry_after = response
                 .headers()
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_owned);
-            let body = response
-                .bytes()
-                .await
-                .map_err(|e| self.classify(&e))?
-                .to_vec();
+            let body = match response.bytes().await {
+                Ok(bytes) => bytes.to_vec(),
+                Err(e) => return Err(self.classify(&e).await),
+            };
             Ok(HttpResponse {
                 status,
                 retry_after,
@@ -698,6 +937,297 @@ mod tests {
         let refused = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
         assert!(!chain_holds_tls_error(&refused));
         assert!(!chain_holds_tls_error(&Outer(refused)));
+    }
+
+    /// The three fixed phrases the evidence renders as — nothing for no
+    /// probe, a parenthetical for each finding — and each carrying arm
+    /// appends them to its own words, so the agent reads both.
+    #[test]
+    fn the_evidence_renders_as_three_fixed_phrases_after_the_errors_own_words() {
+        let opens = ConnectEvidence::TcpOpens {
+            host: "splunk-a.example.com".into(),
+            port: 8089,
+        };
+        let closed = ConnectEvidence::TcpClosed {
+            host: "splunk-a.example.com".into(),
+            port: 8089,
+        };
+        assert_eq!(ConnectEvidence::Unprobed.to_string(), "");
+        assert_eq!(
+            opens.to_string(),
+            " (a plain TCP connection to splunk-a.example.com:8089 opens within the connect timeout, so the failure is past TCP — in the TLS handshake or just after)"
+        );
+        assert_eq!(
+            closed.to_string(),
+            " (a plain TCP connection to splunk-a.example.com:8089 also fails within the connect timeout)"
+        );
+
+        let detail = "error sending request for url (https://splunk-a.example.com:8089/services/auth/login?output_mode=json)";
+        let tls = TransportError::Tls {
+            host: "splunk-a.example.com".into(),
+            detail: detail.into(),
+            evidence: opens,
+        };
+        assert_eq!(
+            tls.to_string(),
+            "TLS handshake with splunk-a.example.com failed: error sending request for url (https://splunk-a.example.com:8089/services/auth/login?output_mode=json) (a plain TCP connection to splunk-a.example.com:8089 opens within the connect timeout, so the failure is past TCP — in the TLS handshake or just after)"
+        );
+        let connect = TransportError::Connect {
+            host: "splunk-a.example.com".into(),
+            detail: detail.into(),
+            evidence: closed,
+        };
+        assert_eq!(
+            connect.to_string(),
+            "could not connect to splunk-a.example.com: error sending request for url (https://splunk-a.example.com:8089/services/auth/login?output_mode=json) (a plain TCP connection to splunk-a.example.com:8089 also fails within the connect timeout)"
+        );
+        let unprobed = TransportError::Connect {
+            host: "splunk-a.example.com".into(),
+            detail: "connection refused".into(),
+            evidence: ConnectEvidence::Unprobed,
+        };
+        assert_eq!(
+            unprobed.to_string(),
+            "could not connect to splunk-a.example.com: connection refused"
+        );
+    }
+
+    /// The decision is a table over shape × evidence × posture, with no
+    /// `reqwest::Error` in it. The rows that motivated it are the measured
+    /// chain — connect-class, no rustls error, `is_timeout` either way —
+    /// under `system`: TCP opening is a certificate (NOT the VPN), TCP
+    /// failing is the VPN (NOT a certificate). And the precedence row: a
+    /// connect timeout is a connect failure, never "the host is reachable".
+    #[test]
+    #[allow(clippy::too_many_lines)] // one row per case; the length IS the coverage
+    fn classification_is_a_table_over_shape_evidence_and_posture() {
+        const HOST: &str = "splunk-a.example.com";
+        fn opens() -> ConnectEvidence {
+            ConnectEvidence::TcpOpens {
+                host: HOST.into(),
+                port: 8089,
+            }
+        }
+        fn closed() -> ConnectEvidence {
+            ConnectEvidence::TcpClosed {
+                host: HOST.into(),
+                port: 8089,
+            }
+        }
+        fn arm(e: &TransportError) -> &'static str {
+            match e {
+                TransportError::Connect { .. } => "connect",
+                TransportError::Timeout { .. } => "timeout",
+                TransportError::Tls { .. } => "tls",
+                TransportError::Other { .. } => "other",
+                TransportError::Unscripted { .. } => "unscripted",
+            }
+        }
+        fn evidence_of(e: &TransportError) -> Option<&ConnectEvidence> {
+            match e {
+                TransportError::Connect { evidence, .. }
+                | TransportError::Tls { evidence, .. }
+                | TransportError::Other { evidence, .. } => Some(evidence),
+                TransportError::Timeout { .. } | TransportError::Unscripted { .. } => None,
+            }
+        }
+        let shape_of = |tls_in_chain, is_connect, is_timeout| ErrorShape {
+            tls_in_chain,
+            is_connect,
+            is_timeout,
+        };
+        let system = TlsPosture::System;
+        let accept_any = TlsPosture::AcceptAny;
+        let ca = TlsPosture::Ca("/etc/ssl/private-root.pem".into());
+        let rows = [
+            (
+                "tls by type",
+                shape_of(true, false, false),
+                ConnectEvidence::Unprobed,
+                &system,
+                "tls",
+            ),
+            (
+                "tls by type outranks a connect-class shape",
+                shape_of(true, true, true),
+                ConnectEvidence::Unprobed,
+                &system,
+                "tls",
+            ),
+            (
+                "the measured chain, TCP opens, system: a certificate",
+                shape_of(false, true, true),
+                opens(),
+                &system,
+                "tls",
+            ),
+            (
+                "the measured chain with is_timeout false, TCP opens, ca: a certificate",
+                shape_of(false, true, false),
+                opens(),
+                &ca,
+                "tls",
+            ),
+            (
+                "TCP opens under accept-any: not a certificate, and not the VPN",
+                shape_of(false, true, true),
+                opens(),
+                &accept_any,
+                "other",
+            ),
+            (
+                "the measured chain, TCP closed, system: the VPN",
+                shape_of(false, true, true),
+                closed(),
+                &system,
+                "connect",
+            ),
+            (
+                "TCP closed under accept-any: still the VPN",
+                shape_of(false, true, false),
+                closed(),
+                &accept_any,
+                "connect",
+            ),
+            (
+                "no probe could be made: connect",
+                shape_of(false, true, false),
+                ConnectEvidence::Unprobed,
+                &system,
+                "connect",
+            ),
+            (
+                "a connect timeout is a connect failure, not a request timeout",
+                shape_of(false, true, true),
+                ConnectEvidence::Unprobed,
+                &system,
+                "connect",
+            ),
+            (
+                "a request timeout that is not connect-class",
+                shape_of(false, false, true),
+                ConnectEvidence::Unprobed,
+                &system,
+                "timeout",
+            ),
+            (
+                "anything else",
+                shape_of(false, false, false),
+                ConnectEvidence::Unprobed,
+                &system,
+                "other",
+            ),
+        ];
+        for (name, shape, evidence, posture, expected) in rows {
+            let got = classify_with(HOST, posture, shape, evidence.clone(), "detail");
+            assert_eq!(arm(&got), expected, "{name}: {got}");
+            let carried = if expected == "timeout" {
+                None
+            } else {
+                Some(&evidence)
+            };
+            assert_eq!(
+                evidence_of(&got),
+                carried,
+                "{name}: the evidence rides the arm"
+            );
+        }
+
+        // The probe runs for exactly "connect-class with no rustls error".
+        assert!(shape_of(false, true, true).wants_probe());
+        assert!(shape_of(false, true, false).wants_probe());
+        assert!(!shape_of(true, true, true).wants_probe());
+        assert!(!shape_of(false, false, true).wants_probe());
+        assert!(!shape_of(false, false, false).wants_probe());
+    }
+
+    /// The probe target is the base URL's host and port — the scheme's
+    /// default when the URL gives none, an address (not a name) for an IP
+    /// literal — and absent when no port is knowable. The probe's budget
+    /// and the posture the decision reads are the ones the transport was
+    /// built under.
+    #[test]
+    fn the_probe_target_is_the_base_urls_host_and_port() {
+        let build = |url: &str| {
+            ReqwestTransport::new(
+                url::Url::parse(url).expect("url"),
+                &TlsPosture::System,
+                Timeouts {
+                    connect: Duration::from_millis(10),
+                    request: Duration::from_millis(10),
+                },
+            )
+            .expect("builds")
+        };
+        let domain = || url::Host::Domain("splunk-a.example.com".to_owned());
+        for (url, host, port) in [
+            ("https://splunk-a.example.com:8089", domain(), 8089),
+            ("https://splunk-a.example.com", domain(), 443),
+            ("http://splunk-a.example.com", domain(), 80),
+            (
+                "https://127.0.0.1:8089",
+                url::Host::Ipv4(std::net::Ipv4Addr::LOCALHOST),
+                8089,
+            ),
+            (
+                "https://[::1]:8089",
+                url::Host::Ipv6(std::net::Ipv6Addr::LOCALHOST),
+                8089,
+            ),
+        ] {
+            let t = build(url);
+            assert_eq!(t.target, Some(ProbeTarget { host, port }), "{url}");
+            assert_eq!(t.connect_timeout, Duration::from_millis(10));
+            assert_eq!(t.posture, TlsPosture::System);
+        }
+        assert_eq!(
+            build("foo://splunk-a.example.com").target,
+            None,
+            "no known port: nothing to probe"
+        );
+    }
+
+    /// The probe against a real socket, on loopback only: a bound listener
+    /// is `TcpOpens`; the same port once the listener is gone is
+    /// `TcpClosed` (refused); a URL with nothing to dial is `Unprobed`.
+    #[tokio::test]
+    async fn the_probe_reports_what_a_loopback_socket_does() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let port = listener.local_addr().expect("addr").port();
+        let timeouts = Timeouts {
+            connect: Duration::from_secs(2),
+            request: Duration::from_secs(2),
+        };
+        let t = ReqwestTransport::new(
+            url::Url::parse(&format!("https://127.0.0.1:{port}")).expect("url"),
+            &TlsPosture::System,
+            timeouts,
+        )
+        .expect("builds");
+        assert_eq!(
+            t.probe().await,
+            ConnectEvidence::TcpOpens {
+                host: "127.0.0.1".into(),
+                port
+            }
+        );
+        drop(listener);
+        assert_eq!(
+            t.probe().await,
+            ConnectEvidence::TcpClosed {
+                host: "127.0.0.1".into(),
+                port
+            }
+        );
+        let nowhere = ReqwestTransport::new(
+            url::Url::parse("foo://splunk-a.example.com").expect("url"),
+            &TlsPosture::System,
+            timeouts,
+        )
+        .expect("builds");
+        assert_eq!(nowhere.probe().await, ConnectEvidence::Unprobed);
     }
 
     #[test]

@@ -24,7 +24,7 @@ bytes say so. So every answer carries an `outcome` discriminant from
 | `found` | false | here it is | the host answered with rows / indexes / identity |
 | `empty` | false | **a finding**: there is nothing | a job finished DONE — and not finalized — with `resultCount: 0`; a role that sees no index |
 | `refused` | true | the question was not accepted — `legal` names what would be | a bad time spec, a window that is provably backwards, `limit` out of `1..=maxResults`, a request over `maxTerms` / `maxTermBytes` / `maxFields`, an index or field outside the grammar, an unknown operator; a rejected credential (after one re-login); a Splunk `400 FATAL` (e.g. `Unknown search command`); a job Splunk marked failed |
-| `blind` | true | the question could not be put — **conclude nothing** | a connect error (the message names the VPN), a request timeout (names `requestTimeoutMs` — the host was reached), a TLS failure (names `--tls`), a 5xx/429 (carries retry advice), a job Splunk finalized at `max_time` with no rows (a timeout, never `empty`), a job reaped before it was read (re-run), a 404 on a fixed route (not the management port), a missing credential file (names the path), no credential configured (names both legal forms) |
+| `blind` | true | the question could not be put — **conclude nothing** | a connect failure with plain TCP failing too (the message names the VPN, and says the probe agreed), a request timeout (names `requestTimeoutMs` — the host was reached), a TLS failure — a `rustls` error in the chain, or a connect-class failure while plain TCP opens (names `--tls`; see [TLS posture](#tls-posture)), a 5xx/429 (carries retry advice), a job Splunk finalized at `max_time` with no rows (a timeout, never `empty`), a job reaped before it was read (re-run), a 404 on a fixed route (not the management port), a missing credential file (names the path), no credential configured (names both legal forms) |
 
 Every HTTP status is classified by [handan](https://github.com/pleme-io/handan)'s
 `judge`; holofote never re-derives what a status means.
@@ -124,6 +124,32 @@ install. That is typed as three postures rather than dissolved into a boolean:
 | `ca:<PEM_PATH>` | add one private root to the trusted set |
 
 A TLS failure is `blind` naming the posture in force and the two remedies.
+
+It is recognised two ways, because one is not enough. By **type**: a
+`rustls::Error` anywhere in reqwest's error chain. And by **evidence**, for the
+case measured 2026-09-09 (reqwest 0.12.28, rustls 0.23.44) against a host
+presenting a self-signed certificate under `system`: the handshake ran past the
+connect timeout, and the chain that came back was `client error (Connect)` →
+`operation timed out` with **no `rustls::Error` in it** — byte-for-byte what a
+filtered port produces, so by type alone a bad certificate read as a VPN that is
+down (and, because `is_timeout()` was checked before `is_connect()`, a filtered
+port could read as "the host is reachable, the call was slow" — the opposite of
+the truth). So after any connect-class failure no rustls error explains, holofote
+makes **one bounded plain-TCP connect** to the same host and port, on the same
+connect budget, and the answer carries what it found (`ConnectEvidence`, a typed
+field rendered once — never prose assembled at the failure site):
+
+| plain TCP | under | classified as | the agent reads |
+|---|---|---|---|
+| opens | `system` / `ca:<PEM>` | TLS | `--tls` and the two remedies, plus "(a plain TCP connection to host:port opens within the connect timeout, so the failure is past TCP — in the TLS handshake or just after)" |
+| opens | `accept-any` | a plain transport failure — a certificate cannot be the cause | the transport's words plus the same parenthetical; never the VPN message |
+| fails too | any | connect | the VPN message plus "(a plain TCP connection to host:port also fails within the connect timeout)" |
+| could not be probed | any | connect | the VPN message, unadorned |
+
+Precedence is TLS by type, then connect-class (a connect timeout IS a connect
+failure), then a request that outran `requestTimeoutMs`, then everything else.
+The decision is a pure function (`transport::classify_with`) driven by a table
+test with no `reqwest::Error` in it.
 
 ## Configuration tiers
 

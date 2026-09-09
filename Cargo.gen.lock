@@ -2,7 +2,7 @@
   "schema_version": 2,
   "cargo_lock_sha256": "a75876dcacddbb81b585af39ad7f641a0c4fc309179cdf8b99531b335b90bc6b",
   "manifest_sha256": {
-    "Cargo.toml": "4d196241208d75713649680b708c49b432c533d3b4d2a1e0a018e5867d3845d3",
+    "Cargo.toml": "398560d27db71cbd4618fc8efd1098c60125eda3195b4d6d5610673154ef6a52",
     "holofote-mcp/Cargo.toml": "781cd566850894b17e3383f2dd70199496fe570f1e8e2a2cb4af9e65926fe752",
     "holofote/Cargo.toml": "6fd434bd5474d6edc867bcc6cacde4afbb2d88ec59a52b4975056a5354f7e93b"
   },
@@ -1587,6 +1587,7 @@
             "features": [
               "io-std",
               "macros",
+              "net",
               "rt-multi-thread",
               "time"
             ],
@@ -1728,6 +1729,7 @@
             "features": [
               "io-std",
               "macros",
+              "net",
               "rt-multi-thread",
               "time"
             ],

@@ -30,7 +30,7 @@ either (no host counts, no measured fleet versions).
 
 | Concern | File |
 |---|---|
-| the seam — `Transport`, `ReqwestTransport`, `MockTransport` (feature `mock`) | `holofote/src/transport.rs` |
+| the seam — `Transport`, `ReqwestTransport`, `MockTransport` (feature `mock`); failure classification: `ErrorShape` + `ConnectEvidence` → the pure `classify_with` | `holofote/src/transport.rs` |
 | the closed `Route` enum, its ONE `Display`, the validated `Sid`, what a 404 means per route (`Absence`) | `holofote/src/route.rs` |
 | credentials read when needed into `Zeroizing`, header rendering | `holofote/src/auth.rs` |
 | `ServerVersion` → `ResultsRoute` (`>= 9.0` → v2, else v1) | `holofote/src/version.rs` |
@@ -63,9 +63,18 @@ either (no host counts, no measured fleet versions).
   9.0.1. Never configure it; never guess it — an unparseable version is `blind`.
 - **Every HTTP status is judged by `handan::judge`.** Nothing here re-derives
   what a 403 means. 401/403 on the password path re-logins ONCE and retries ONCE.
-- **Four outcomes, never collapsed.** connect → `blind` naming the VPN; request
-  timeout → `blind` naming `requestTimeoutMs` (the host WAS reached); TLS →
-  `blind` naming `--tls`; 5xx/429 → `blind` with retry advice; 404 → `blind` for
+- **Four outcomes, never collapsed.** connect (plain TCP fails too) → `blind`
+  naming the VPN; request timeout → `blind` naming `requestTimeoutMs` (the host
+  WAS reached); TLS → `blind` naming `--tls` — recognised by TYPE (a
+  `rustls::Error` in the chain) OR by EVIDENCE (a connect-class failure while a
+  bounded plain-TCP probe to the same host:port opens), because the handshake
+  can outrun the connect timeout and leave no rustls error at all (measured
+  2026-09-09; that chain is identical to a filtered port's). Precedence is
+  TLS-by-type, then `is_connect()` (a connect timeout IS a connect failure),
+  then `is_timeout()`. The decision is the pure `transport::classify_with`
+  over `ErrorShape` + `ConnectEvidence` + posture, table-tested with no
+  `reqwest::Error`; under `accept-any` TCP-opens is a plain transport failure
+  carrying the evidence, never the VPN message; 5xx/429 → `blind` with retry advice; 404 → `blind` for
   what the ROUTE's absence means (`Route::absence`: results route → version
   pairing; job route → reaped, re-run; fixed route → not the management API);
   400 FATAL / validation failure / rejected credential → `refused` with the

@@ -768,7 +768,7 @@ impl<T: Transport> SplunkClient<T> {
 mod tests {
     use super::*;
     use crate::spl::{SortRequest, TermRequest};
-    use crate::transport::{MockTransport, RecordedCall, Scripted};
+    use crate::transport::{ConnectEvidence, MockTransport, RecordedCall, Scripted};
     use serde_json::json;
     use shikumi::TieredConfig as _;
     use std::io::Write as _;
@@ -1578,6 +1578,7 @@ mod tests {
             vec![Scripted::Fail(TransportError::Connect {
                 host: "splunk-a.example.com".into(),
                 detail: "connection timed out".into(),
+                evidence: ConnectEvidence::Unprobed,
             })],
         );
         let c = client(mock, files.credential, fast_config());
@@ -1620,6 +1621,7 @@ mod tests {
             vec![Scripted::Fail(TransportError::Tls {
                 host: "splunk-a.example.com".into(),
                 detail: "invalid peer certificate: UnknownIssuer".into(),
+                evidence: ConnectEvidence::Unprobed,
             })],
         );
         let c = client(mock, files.credential, fast_config());
@@ -1631,6 +1633,97 @@ mod tests {
         assert!(
             !because.contains("VPN"),
             "a TLS failure is not a reachability failure: {because}"
+        );
+    }
+
+    /// reqwest's own words for the measured chain — connect-class, no
+    /// rustls error — as the transport reports them.
+    const MEASURED_DETAIL: &str = "error sending request for url (https://splunk-a.example.com:8089/services/auth/login?output_mode=json)";
+
+    /// The measured chain with plain TCP opening, under `system`: the
+    /// transport classified it TLS on evidence, and the agent reads the
+    /// posture flag, both remedies, and the evidence — never the VPN.
+    #[tokio::test]
+    async fn a_handshake_that_outran_the_connect_timeout_is_blind_naming_tls_with_the_evidence() {
+        let files = password_files("observer", "s3cret");
+        let mock = MockTransport::new().on(
+            &Route::Login,
+            vec![Scripted::Fail(TransportError::Tls {
+                host: "splunk-a.example.com".into(),
+                detail: MEASURED_DETAIL.into(),
+                evidence: ConnectEvidence::TcpOpens {
+                    host: "splunk-a.example.com".into(),
+                    port: 8089,
+                },
+            })],
+        );
+        let c = SplunkClient::new(
+            mock,
+            files.credential,
+            fast_config(),
+            Identity {
+                tls_posture: TlsPosture::System,
+                ..identity()
+            },
+        );
+        let because = blind(c.whoami().await);
+        assert_eq!(
+            because,
+            "TLS handshake with splunk-a.example.com failed: error sending request for url (https://splunk-a.example.com:8089/services/auth/login?output_mode=json) (a plain TCP connection to splunk-a.example.com:8089 opens within the connect timeout, so the failure is past TCP — in the TLS handshake or just after) under `--tls system`. Splunk's stock certificate is self-signed: use `--tls accept-any` (degraded) or `--tls ca:<PEM>` with the private root"
+        );
+    }
+
+    /// The same chain with plain TCP failing too: the VPN — and the message
+    /// carries the evidence, so the agent can see the probe agreed.
+    #[tokio::test]
+    async fn a_connect_failure_with_tcp_also_failing_is_blind_naming_the_vpn_with_the_evidence() {
+        let files = password_files("observer", "s3cret");
+        let mock = MockTransport::new().on(
+            &Route::Login,
+            vec![Scripted::Fail(TransportError::Connect {
+                host: "splunk-a.example.com".into(),
+                detail: MEASURED_DETAIL.into(),
+                evidence: ConnectEvidence::TcpClosed {
+                    host: "splunk-a.example.com".into(),
+                    port: 8089,
+                },
+            })],
+        );
+        let c = client(mock, files.credential, fast_config());
+        let because = blind(c.whoami().await);
+        assert_eq!(
+            because,
+            "could not connect to splunk-a.example.com: error sending request for url (https://splunk-a.example.com:8089/services/auth/login?output_mode=json) (a plain TCP connection to splunk-a.example.com:8089 also fails within the connect timeout). The usual cause is that the VPN this host lives behind is not connected — connect it and retry"
+        );
+        assert!(!because.contains("--tls"), "{because}");
+    }
+
+    /// Under `accept-any` a certificate cannot be the cause, so TCP opening
+    /// is a plain transport failure: rendered transparently, with the
+    /// evidence, and never the VPN message — TCP opened.
+    #[tokio::test]
+    async fn tcp_opening_under_accept_any_is_blind_with_the_evidence_and_not_the_vpn() {
+        let files = password_files("observer", "s3cret");
+        let mock = MockTransport::new().on(
+            &Route::Login,
+            vec![Scripted::Fail(TransportError::Other {
+                host: "splunk-a.example.com".into(),
+                detail: MEASURED_DETAIL.into(),
+                evidence: ConnectEvidence::TcpOpens {
+                    host: "splunk-a.example.com".into(),
+                    port: 8089,
+                },
+            })],
+        );
+        let c = client(mock, files.credential, fast_config());
+        let because = blind(c.whoami().await);
+        assert_eq!(
+            because,
+            "request to splunk-a.example.com failed: error sending request for url (https://splunk-a.example.com:8089/services/auth/login?output_mode=json) (a plain TCP connection to splunk-a.example.com:8089 opens within the connect timeout, so the failure is past TCP — in the TLS handshake or just after)"
+        );
+        assert!(
+            !because.contains("VPN") && !because.contains("--tls"),
+            "{because}"
         );
     }
 

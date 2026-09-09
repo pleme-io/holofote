@@ -1,0 +1,45 @@
+[package]
+name = "holofote"
+description = "holofote (searchlight) — typed Splunk REST client: a transport seam, a closed route enum, a typed SPL AST with exactly one renderer, version-derived result routes, and an outcome sum (found / empty / refused / blind) that never collapses two answers into one"
+keywords = ["splunk", "spl", "observability", "typed", "mcp"]
+categories = ["api-bindings", "web-programming::http-client"]
+readme = "../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[features]
+# The scripted `MockTransport` and its `RecordedCall`, which copy secrets
+# into plain strings so a test can assert on them. Off in the shipped
+# library; a consumer scripting the client opts in.
+mock = []
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[dependencies]
+kotae.workspace = true
+handan.workspace = true
+shikumi.workspace = true
+tatara-lisp.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+tokio.workspace = true
+url.workspace = true
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+blake3.workspace = true
+tempfile.workspace = true

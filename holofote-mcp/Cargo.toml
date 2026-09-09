@@ -1,0 +1,43 @@
+[package]
+name = "holofote-mcp"
+description = "holofote-mcp — the observe-only Splunk MCP server (stdio). Three tools (splunk_whoami, splunk_indexes, splunk_search); every answer is one of kotae's four outcomes, and there is no mutating tool because the client has no mutating method"
+keywords = ["splunk", "mcp", "observability", "agent"]
+categories = ["command-line-utilities"]
+readme = "../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "holofote-mcp"
+path = "src/main.rs"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[dependencies]
+holofote.workspace = true
+kotae.workspace = true
+shikumi.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+url.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+# The border tests script the transport; the feature is dev-only, so the
+# shipped binary links a library with no mock.
+holofote = { workspace = true, features = ["mock"] }
+serde_json.workspace = true
+tempfile.workspace = true

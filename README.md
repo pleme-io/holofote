@@ -2,15 +2,15 @@
 
 **A typed Splunk REST client and an observe-only MCP server.**
 
-*holofote* is Brazilian Portuguese for *searchlight*: it points at one Splunk
-host and reports what it sees. It never writes.
+*holofote* is Brazilian Portuguese for *searchlight*: it points at a Splunk
+host, or several, and reports what it sees. It never writes.
 
 Two workspace members:
 
 | crate | what it is |
 |---|---|
 | `holofote` | the library — a transport seam, a closed route enum, a typed SPL AST with exactly one renderer, a results route derived from the server version, shikumi config, and an outcome sum. No rmcp dependency. |
-| `holofote-mcp` | the stdio MCP server (rmcp) — three tools over one host and one credential. |
+| `holofote-mcp` | the stdio MCP server (rmcp) — three tools over one target, or over several targets addressed by label. |
 
 ## The four outcomes
 
@@ -35,7 +35,12 @@ Every HTTP status is classified by [handan](https://github.com/pleme-io/handan)'
 holofote-mcp --host <URL> --label <STRING>
              [--user-file <PATH> --password-file <PATH> | --token-file <PATH>]
              [--tls <system|accept-any|ca:<PEM_PATH>>] [--config <PATH>]
+
+holofote-mcp --target <JSON> [--target <JSON> …] [--config <PATH>]
 ```
+
+The first form serves one target, exactly as it always has. The second serves
+every `--target` from one process; see [Several targets](#several-targets).
 
 | flag | meaning |
 |---|---|
@@ -56,13 +61,43 @@ Trailing newlines are trimmed and the contents are held only in
 the buffers handed to the HTTP stack are wiped when it releases them.
 Logging goes to stderr only; stdout is the MCP transport.
 
+## Several targets
+
+Each `--target` is one JSON object carrying what the single-target flags carry,
+under the same names:
+
+```
+--target '{"label":"alpha","host":"https://splunk-a.example.com:8089","tls":"accept-any","user-file":"/run/alpha/user","password-file":"/run/alpha/password"}'
+--target '{"label":"beta","host":"https://splunk-b.example.com:8089","token-file":"/run/beta/token"}'
+```
+
+| key | meaning |
+|---|---|
+| `label` | required; the name a caller passes as `target`, and the label in every answer |
+| `host` | required; as `--host` |
+| `tls` | as `--tls`, default `system` |
+| `user-file` + `password-file` / `token-file` | as the credential flags, with the same pairing rules |
+
+Every target keeps its own host, TLS posture and credential; `--config` (the
+bounds) is shared. An unknown key, a half credential pair, both credential
+forms, a bad `tls` or a host that is not a URL is refused at parse; a label used
+twice is refused at startup. `--target` conflicts with `--host`, `--label`,
+`--tls` and the credential flags.
+
+With `--target`, every tool takes a **required** `target` (the label), the
+schema says so, and the server instructions name the legal targets once. An
+unknown or missing `target` is `refused`, with `legal` listing every label
+served. One target answering `blind` says nothing about another. In the
+single-target form the schemas are what they always were — no `target` — and a
+`target` a client sends anyway must be the one label.
+
 ## Tools
 
 | tool | input | found payload |
 |---|---|---|
-| `splunk_whoami` | `{}` | `label, host, version, build, server_name, username, roles, tls_posture, results_route` — the cheap reachability + credential probe |
-| `splunk_indexes` | `{limit?}` | `indexes: [{name, total_event_count?, min_time?, max_time?}], total, truncated` |
-| `splunk_search` | `{index, terms?, earliest, latest?, limit, fields?, stats_count_by?, sort?}` | `spl, sid, result_count, fields, rows, truncated, finalized, messages?` |
+| `splunk_whoami` | `{target}` with `--target`, else `{}` | `label, host, version, build, server_name, username, roles, tls_posture, results_route` — the cheap reachability + credential probe |
+| `splunk_indexes` | `{target, limit?}` / `{limit?}` | `indexes: [{name, total_event_count?, min_time?, max_time?}], total, truncated` |
+| `splunk_search` | `{target, index, terms?, earliest, latest?, limit, fields?, stats_count_by?, sort?}` | `spl, sid, result_count, fields, rows, truncated, finalized, messages?` |
 
 `splunk_search` renders exactly one shape:
 

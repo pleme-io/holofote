@@ -22,6 +22,7 @@
 //! | [`config`] | `HolofoteConfig`: shikumi tiers + a `(defholofote …)` face on one struct |
 //! | [`outcome`] | `Outcome` (found / empty / refused / blind) and the typed causes behind the last two |
 //! | [`client`] | `SplunkClient<T: Transport>`: login, the single re-login, the job lifecycle |
+//! | [`targets`] | `Targets<T>`: several clients keyed by label; an unknown target is a `Refusal` naming the legal ones |
 //!
 //! # Four outcomes, never collapsed
 //!
@@ -47,6 +48,7 @@ pub mod config;
 pub mod outcome;
 pub mod route;
 pub mod spl;
+pub mod targets;
 pub mod tls;
 pub mod transport;
 pub mod version;
@@ -57,6 +59,7 @@ pub use config::{ConfigError, HolofoteConfig};
 pub use outcome::Outcome;
 pub use route::{ResultsRoute, Route, Sid};
 pub use spl::{Search, SearchRequest, SortRequest, TermRequest};
+pub use targets::{Targets, TargetsError};
 pub use tls::TlsPosture;
 #[cfg(any(test, feature = "mock"))]
 pub use transport::MockTransport;

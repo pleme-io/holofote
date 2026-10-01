@@ -28,6 +28,7 @@ shikumi.workspace = true
 rmcp.workspace = true
 schemars.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 url.workspace = true
@@ -39,5 +40,4 @@ tracing-subscriber.workspace = true
 # The border tests script the transport; the feature is dev-only, so the
 # shipped binary links a library with no mock.
 holofote = { workspace = true, features = ["mock"] }
-serde_json.workspace = true
 tempfile.workspace = true

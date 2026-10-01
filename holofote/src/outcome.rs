@@ -249,6 +249,10 @@ pub enum Refusal {
     /// The request failed validation before it was sent.
     #[error(transparent)]
     Invalid(#[from] SplError),
+    #[error("no target named {got:?}; this server serves: {}", known.join(", "))]
+    UnknownTarget { got: String, known: Vec<String> },
+    #[error("this server serves several targets and the call named none; pass `target`, one of: {}", known.join(", "))]
+    TargetRequired { known: Vec<String> },
 }
 
 impl Refusal {
@@ -266,6 +270,7 @@ impl Refusal {
                     .to_owned(),
             ],
             Self::Invalid(e) => e.legal(),
+            Self::UnknownTarget { known, .. } | Self::TargetRequired { known } => known.clone(),
         }
     }
 }

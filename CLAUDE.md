@@ -13,6 +13,7 @@ skip-platform-mediated: pure-binary-no-cluster-runtime
 One-sentence purpose: ask a Splunk host three observe-only questions — who am I,
 which indexes can I see, run one bounded search — and answer each with one of
 kotae's four outcomes, so a host behind a down VPN is never read as an empty index.
+One process can serve several hosts (`--target`, repeated), each addressed by label.
 
 ## Public and generic — no estate identifiers
 
@@ -37,6 +38,7 @@ either (no host counts, no measured fleet versions).
 | typed SPL: `IndexName`/`FieldName` grammar, `TimeSpec` + clockless ordering, `ResultCap` + the probe row, `SearchBounds`, the ONE renderer | `holofote/src/spl.rs` |
 | `Outcome` + the typed `Blindness` / `Refusal` causes | `holofote/src/outcome.rs` |
 | `SplunkClient<T: Transport>`: login, the single re-login, the job lifecycle | `holofote/src/client.rs` |
+| `Targets<T>`: several clients keyed by label; `resolve` → client or a `Refusal` naming every label | `holofote/src/targets.rs` |
 | `HolofoteConfig`: shikumi tiers + `(defholofote …)` on one struct | `holofote/src/config.rs`, `holofote/specs/holofote.lisp` |
 | the CLI contract, tool inputs, the MCP border | `holofote-mcp/src/main.rs` |
 
@@ -95,6 +97,12 @@ either (no host counts, no measured fleet versions).
   — outside `#[cfg(test)] mod` blocks; the ban test walks both members and
   strips those blocks first. Use `write!` into a `Display`, thiserror, tracing,
   or serde.
+- **A target is addressed by label, and a bad address is `refused`.** With
+  `--target`, `Refusal::UnknownTarget` / `TargetRequired` carry every label as
+  `legal`; the schema marks `target` required on all three tools, and the
+  instructions name the labels once. The single-target form (`--host`/`--label`)
+  is unchanged on the wire: its schemas carry no `target` (stripped at
+  construction), and a `target` sent anyway must equal the one label.
 - **The job is released on every path** — success, empty, failed, and timeout —
   by a best-effort `DELETE`; four tests pin it.
 

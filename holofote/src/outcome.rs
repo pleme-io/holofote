@@ -1,87 +1,16 @@
-//! The four things a call can conclude, as the library's own sum — and the
-//! typed reasons behind the two that are not about the world.
+//! The typed reasons behind the two outcomes that are not about the world.
 //!
-//! [`Outcome`] is the crate's vocabulary; it converts into `kotae::Answer`
-//! at the border (`From`), so the MCP server never chooses a discriminant
-//! by hand. [`Blindness`] and [`Refusal`] are the typed causes: every
-//! message an agent will read is a `thiserror` `Display`, so the words are
-//! written once and the ★★ TYPED EMISSION rule holds without a `format!`.
+//! [`Outcome`] is kotae's four-arm sum, re-exported; the MCP server renders
+//! it with `Outcome::render`, so no discriminant is chosen by hand.
+//! [`Blindness`] and [`Refusal`] are the typed causes: every message an
+//! agent will read is a `thiserror` `Display`, so the words are written once
+//! and the ★★ TYPED EMISSION rule holds without a `format!`.
 
-use serde::Serialize;
+pub use kotae::{Outcome, OutcomeKind};
 
 use crate::auth::{CredentialError, LEGAL_CREDENTIAL_FORMS};
 use crate::spl::SplError;
 use crate::transport::TransportError;
-
-/// What a call concluded. Generic over the found payload so each client
-/// method returns its own shape.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Outcome<P> {
-    /// Answered; here it is.
-    Found(P),
-    /// Answered; there is nothing. `of` names what was looked for.
-    Empty {
-        /// What was looked for.
-        of: String,
-    },
-    /// The host answered and rejected the question, or the question failed
-    /// validation before it was put. `legal` names what would be accepted.
-    Refused {
-        /// Why.
-        because: String,
-        /// What would have been accepted. Empty when not enumerable.
-        legal: Vec<String>,
-    },
-    /// The question could not be put at all. Says nothing about the subject.
-    Blind {
-        /// What stopped it.
-        because: String,
-    },
-}
-
-impl<P> Outcome<P> {
-    /// The discriminant, matching kotae's vocabulary.
-    #[must_use]
-    pub const fn kind(&self) -> &'static str {
-        match self {
-            Self::Found(_) => "found",
-            Self::Empty { .. } => "empty",
-            Self::Refused { .. } => "refused",
-            Self::Blind { .. } => "blind",
-        }
-    }
-
-    /// `true` only for `Found` and `Empty` — the two that say something
-    /// about the subject rather than about the attempt.
-    #[must_use]
-    pub const fn is_about_the_world(&self) -> bool {
-        matches!(self, Self::Found(_) | Self::Empty { .. })
-    }
-
-    /// Map the found payload, leaving the other three arms untouched.
-    pub fn map<Q>(self, f: impl FnOnce(P) -> Q) -> Outcome<Q> {
-        match self {
-            Self::Found(p) => Outcome::Found(f(p)),
-            Self::Empty { of } => Outcome::Empty { of },
-            Self::Refused { because, legal } => Outcome::Refused { because, legal },
-            Self::Blind { because } => Outcome::Blind { because },
-        }
-    }
-}
-
-impl<P: Serialize> From<Outcome<P>> for kotae::Answer {
-    fn from(o: Outcome<P>) -> Self {
-        match o {
-            Outcome::Found(p) => Self::found(&p),
-            Outcome::Empty { of } => Self::empty(of),
-            Outcome::Refused { because, legal } if legal.is_empty() => {
-                Self::refused_flatly(because)
-            }
-            Outcome::Refused { because, legal } => Self::refused(because, legal),
-            Outcome::Blind { because } => Self::blind(because),
-        }
-    }
-}
 
 /// Why the question could not be put. Each arm names its remedy.
 #[derive(Debug, thiserror::Error)]
@@ -317,103 +246,98 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
 
-    fn render<P: Serialize>(o: Outcome<P>) -> Value {
-        let answer: kotae::Answer = o.into();
-        serde_json::from_str(&answer.render()).expect("valid JSON")
+    fn render<P: serde::Serialize>(o: &Outcome<P>) -> Value {
+        serde_json::from_str(&o.render()).expect("valid JSON")
     }
 
-    /// The four arms render four different discriminants — and the typed
-    /// `kind()` agrees with what a reader sees on the wire.
-    #[test]
-    fn the_four_outcomes_render_four_distinct_discriminants() {
-        let outcomes: [Outcome<Value>; 4] = [
-            Outcome::Found(json!({"rows": []})),
-            Outcome::Empty {
-                of: "events".into(),
-            },
-            Outcome::Refused {
-                because: "bad".into(),
-                legal: vec!["good".into()],
-            },
-            Outcome::Blind {
-                because: "down".into(),
-            },
-        ];
-        let mut seen = std::collections::HashSet::new();
-        for o in outcomes {
-            let kind = o.kind();
-            let about_world = o.is_about_the_world();
-            let v = render(o);
-            assert_eq!(v["outcome"], kind);
-            assert!(seen.insert(kind), "{kind} rendered twice");
-            assert_eq!(about_world, matches!(kind, "found" | "empty"));
+    fn sample(kind: OutcomeKind) -> Outcome<Value> {
+        match kind {
+            OutcomeKind::Found => Outcome::Found(json!({"rows": []})),
+            OutcomeKind::Empty => Outcome::empty("events"),
+            OutcomeKind::Refused => Outcome::refused("bad", ["good"]),
+            OutcomeKind::Blind => Outcome::blind("down"),
         }
-        assert_eq!(seen.len(), 4);
+    }
+
+    #[test]
+    fn every_arm_renders_its_own_discriminant() {
+        let mut seen = std::collections::HashSet::new();
+        for kind in OutcomeKind::ALL {
+            let o = sample(*kind);
+            assert_eq!(o.kind(), *kind);
+            let v = render(&o);
+            assert_eq!(v["outcome"], kind.as_str());
+            assert!(seen.insert(kind.as_str()), "{kind} rendered twice");
+            assert_eq!(
+                o.is_about_the_world(),
+                matches!(kind, OutcomeKind::Found | OutcomeKind::Empty)
+            );
+        }
+        assert_eq!(seen.len(), OutcomeKind::ALL.len());
     }
 
     #[test]
     fn an_empty_legal_set_becomes_the_flat_refusal() {
-        let v = render(Outcome::<()>::Refused {
-            because: "x".into(),
-            legal: vec![],
-        });
+        let v = render(&Outcome::<()>::refused_flatly("x"));
         assert_eq!(v["outcome"], "refused");
         assert!(v["legal"].is_null());
-        let w = render(Outcome::<()>::Refused {
-            because: "x".into(),
-            legal: vec!["a".into()],
-        });
+        let w = render(&Outcome::<()>::refused("x", ["a"]));
         assert_eq!(w["legal"], json!(["a"]));
+    }
+
+    fn arms<P>(o: Outcome<P>) -> (OutcomeKind, String, Vec<String>) {
+        match o {
+            Outcome::Found(_) => (OutcomeKind::Found, String::new(), Vec::new()),
+            Outcome::Empty { of } => (OutcomeKind::Empty, of, Vec::new()),
+            Outcome::Refused { because, legal } => (OutcomeKind::Refused, because, legal),
+            Outcome::Blind { because } => (OutcomeKind::Blind, because, Vec::new()),
+        }
     }
 
     #[test]
     fn failures_convert_to_the_matching_arm_with_their_legal_set() {
-        let unauthorized: Outcome<()> = Failure::from(Refusal::Unauthorized {
-            host: "splunk-a.example.com".into(),
-            status: 401,
-            route: "/services/server/info".into(),
-        })
-        .into();
-        match &unauthorized {
-            Outcome::Refused { because, legal } => {
-                assert!(
-                    because.contains("401") && because.contains("retrying cannot help"),
-                    "{because}"
-                );
-                assert_eq!(legal.len(), LEGAL_CREDENTIAL_FORMS.len());
-            }
-            other => panic!("expected refused, got {}", other.kind()),
-        }
+        let (kind, because, legal) =
+            arms(Outcome::<()>::from(Failure::from(Refusal::Unauthorized {
+                host: "splunk-a.example.com".into(),
+                status: 401,
+                route: "/services/server/info".into(),
+            })));
+        assert_eq!(kind, OutcomeKind::Refused);
+        assert!(
+            because.contains("401") && because.contains("retrying cannot help"),
+            "{because}"
+        );
+        assert_eq!(legal.len(), LEGAL_CREDENTIAL_FORMS.len());
 
-        let blind: Outcome<()> = Failure::from(Blindness::Unreachable {
+        let (kind, because, _) = arms(Outcome::<()>::from(Failure::from(Blindness::Unreachable {
             source: TransportError::Connect {
                 host: "splunk-a.example.com".into(),
                 detail: "connection refused".into(),
                 evidence: crate::transport::ConnectEvidence::Unprobed,
             },
-        })
-        .into();
-        match &blind {
-            Outcome::Blind { because } => assert!(because.contains("VPN"), "{because}"),
-            other => panic!("expected blind, got {}", other.kind()),
-        }
+        })));
+        assert_eq!(kind, OutcomeKind::Blind);
+        assert!(because.contains("VPN"), "{because}");
 
-        let invalid: Outcome<()> =
-            Failure::from(SplError::IllegalIndex { got: "a b".into() }).into();
-        match &invalid {
-            Outcome::Refused { legal, .. } => {
-                assert_eq!(legal, &vec![crate::spl::IDENT_GRAMMAR.to_owned()]);
-            }
-            other => panic!("expected refused, got {}", other.kind()),
-        }
+        let (kind, _, legal) = arms(Outcome::<()>::from(Failure::from(SplError::IllegalIndex {
+            got: "a b".into(),
+        })));
+        assert_eq!(kind, OutcomeKind::Refused);
+        assert_eq!(legal, vec![crate::spl::IDENT_GRAMMAR.to_owned()]);
     }
 
     #[test]
     fn map_touches_only_the_found_arm() {
-        assert_eq!(Outcome::Found(2).map(|n| n * 2), Outcome::Found(4));
-        assert_eq!(
-            Outcome::<i32>::Empty { of: "x".into() }.map(|n| n * 2),
-            Outcome::Empty { of: "x".into() }
-        );
+        for kind in OutcomeKind::ALL {
+            let before = sample(*kind);
+            let after = before.clone().map(|_| 7_u8);
+            let expected = match before {
+                Outcome::Found(_) => Outcome::Found(7_u8),
+                Outcome::Empty { of } => Outcome::Empty { of },
+                Outcome::Refused { because, legal } => Outcome::Refused { because, legal },
+                Outcome::Blind { because } => Outcome::Blind { because },
+            };
+            assert_eq!(after, expected);
+        }
     }
 }

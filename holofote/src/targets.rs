@@ -132,7 +132,7 @@ mod tests {
             "{msg}"
         );
         let outcome: Outcome<()> = Failure::from(refusal).into();
-        assert_eq!(outcome.kind(), "refused");
+        assert_eq!(outcome.kind(), crate::OutcomeKind::Refused);
     }
 
     #[test]

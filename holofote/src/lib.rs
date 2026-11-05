@@ -20,7 +20,7 @@
 //! | [`version`] | the server version, and the v1/v2 results route derived from it |
 //! | [`spl`] | typed SPL — identifiers with one grammar, time specs, a bounded cap, ONE renderer |
 //! | [`config`] | `HolofoteConfig`: shikumi tiers + a `(defholofote …)` face on one struct |
-//! | [`outcome`] | `Outcome` (found / empty / refused / blind) and the typed causes behind the last two |
+//! | [`outcome`] | kotae's `Outcome` (found / empty / refused / blind), re-exported, and the typed causes behind the last two |
 //! | [`client`] | `SplunkClient<T: Transport>`: login, the single re-login, the job lifecycle |
 //! | [`targets`] | `Targets<T>`: several clients keyed by label; an unknown target is a `Refusal` naming the legal ones |
 //!
@@ -56,7 +56,7 @@ pub mod version;
 pub use auth::{Credential, LEGAL_CREDENTIAL_FORMS};
 pub use client::{Identity, IndexList, IndexSummary, SearchHits, SplunkClient, WhoAmI};
 pub use config::{ConfigError, HolofoteConfig};
-pub use outcome::Outcome;
+pub use outcome::{Outcome, OutcomeKind};
 pub use route::{ResultsRoute, Route, Sid};
 pub use spl::{Search, SearchRequest, SortRequest, TermRequest};
 pub use targets::{Targets, TargetsError};

@@ -23,7 +23,6 @@ missing_panics_doc = "allow"
 
 [dependencies]
 holofote.workspace = true
-kotae.workspace = true
 shikumi.workspace = true
 rmcp.workspace = true
 schemars.workspace = true

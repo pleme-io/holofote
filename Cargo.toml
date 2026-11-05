@@ -18,7 +18,7 @@ holofote = { path = "holofote", version = "0.1.0" }
 # ── the fleet answer vocabulary ────────────────────────────────────────
 # kotae — the four distinguishable outcomes of a tool call. handan — what an
 # HTTP status MEANS, owned once; holofote never re-derives it.
-kotae = "0.1"
+kotae = "0.1.2"
 handan = "0.1"
 
 # ── configuration: one struct, two faces (shikumi tiers + a (def…) form) ─

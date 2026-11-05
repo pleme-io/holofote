@@ -936,21 +936,36 @@ mod tests {
     fn found<P>(o: Outcome<P>) -> P {
         match o {
             Outcome::Found(p) => p,
-            other => panic!("expected found, got {}", other.kind()),
+            Outcome::Empty { of } => panic!("expected found, got empty: {of}"),
+            Outcome::Refused { because, .. } => panic!("expected found, got refused: {because}"),
+            Outcome::Blind { because } => panic!("expected found, got blind: {because}"),
         }
     }
 
     fn refused<P>(o: Outcome<P>) -> (String, Vec<String>) {
         match o {
             Outcome::Refused { because, legal } => (because, legal),
-            other => panic!("expected refused, got {}", other.kind()),
+            Outcome::Found(_) => panic!("expected refused, got found"),
+            Outcome::Empty { of } => panic!("expected refused, got empty: {of}"),
+            Outcome::Blind { because } => panic!("expected refused, got blind: {because}"),
         }
     }
 
     fn blind<P>(o: Outcome<P>) -> String {
         match o {
             Outcome::Blind { because } => because,
-            other => panic!("expected blind, got {}", other.kind()),
+            Outcome::Found(_) => panic!("expected blind, got found"),
+            Outcome::Empty { of } => panic!("expected blind, got empty: {of}"),
+            Outcome::Refused { because, .. } => panic!("expected blind, got refused: {because}"),
+        }
+    }
+
+    fn empty<P>(o: Outcome<P>) -> String {
+        match o {
+            Outcome::Empty { of } => of,
+            Outcome::Found(_) => panic!("expected empty, got found"),
+            Outcome::Refused { because, .. } => panic!("expected empty, got refused: {because}"),
+            Outcome::Blind { because } => panic!("expected empty, got blind: {because}"),
         }
     }
 
@@ -1249,13 +1264,9 @@ mod tests {
         let files = password_files("observer", "s3cret");
         let mock = splunk_8("K", vec![job_status("DONE", true, false, 0)], json!([]));
         let c = client(mock, files.credential, fast_config());
-        match c.search(request()).await {
-            Outcome::Empty { of } => {
-                assert!(of.contains("search index=\"main\""), "{of}");
-                assert!(of.contains("[-15m, now]"), "{of}");
-            }
-            other => panic!("expected empty, got {}", other.kind()),
-        }
+        let of = empty(c.search(request()).await);
+        assert!(of.contains("search index=\"main\""), "{of}");
+        assert!(of.contains("[-15m, now]"), "{of}");
         assert!(
             c.transport.calls_to(&Route::JobResultsV1(sid())).is_empty(),
             "no results read for an empty job"
@@ -1562,10 +1573,8 @@ mod tests {
                 vec![(200, json!({ "entry": [], "paging": { "total": 0 } }))],
             );
         let c = client(mock, files.credential, fast_config());
-        match c.indexes(None).await {
-            Outcome::Empty { of } => assert!(of.contains("indexes visible"), "{of}"),
-            other => panic!("expected empty, got {}", other.kind()),
-        }
+        let of = empty(c.indexes(None).await);
+        assert!(of.contains("indexes visible"), "{of}");
     }
 
     // ── blindness ─────────────────────────────────────────────────────
@@ -1846,10 +1855,8 @@ mod tests {
             .search(request())
             .await;
 
-        let render = |o: Outcome<SearchHits>| -> Value {
-            let a: kotae::Answer = o.into();
-            serde_json::from_str(&a.render()).expect("json")
-        };
+        let render =
+            |o: Outcome<SearchHits>| -> Value { serde_json::from_str(&o.render()).expect("json") };
         let (e, r, b) = (render(empty), render(refused), render(blind));
         assert_eq!(e["outcome"], "empty");
         assert_eq!(r["outcome"], "refused");

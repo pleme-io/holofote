@@ -1,0 +1,61 @@
+== found-object is_error=Some(false)
+{
+  "outcome": "found",
+  "rows": [
+    {
+      "host": "h1",
+      "n": 2
+    }
+  ]
+}
+== found-array is_error=Some(false)
+{
+  "outcome": "found",
+  "result": [
+    1,
+    2,
+    3
+  ]
+}
+== found-unit is_error=Some(false)
+{
+  "outcome": "found",
+  "result": null
+}
+== empty is_error=Some(false)
+{
+  "note": "This IS the answer: nothing was found. The tool looked and there is nothing there.",
+  "of": "events in index main",
+  "outcome": "empty"
+}
+== refused-legal is_error=Some(true)
+{
+  "because": "limit 0 is out of range",
+  "legal": [
+    "1..=10000"
+  ],
+  "note": "The QUESTION was not understood. This says nothing about whether the thing you asked for exists.",
+  "outcome": "refused"
+}
+== refused-flat is_error=Some(true)
+{
+  "because": "no",
+  "note": "The QUESTION was not understood. This says nothing about whether the thing you asked for exists.",
+  "outcome": "refused"
+}
+== blind is_error=Some(true)
+{
+  "because": "the VPN is not connected",
+  "note": "The tool could NOT look. This is not an absence and not a denial — conclude nothing about the subject.",
+  "outcome": "blind"
+}
+== refused-from-failure is_error=Some(true)
+{
+  "because": "no target named \"zeta\"; this server serves: alpha, beta",
+  "legal": [
+    "alpha",
+    "beta"
+  ],
+  "note": "The QUESTION was not understood. This says nothing about whether the thing you asked for exists.",
+  "outcome": "refused"
+}

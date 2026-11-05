@@ -45,8 +45,8 @@ use holofote::outcome::{Failure, Refusal};
 use holofote::tls::TlsPostureError;
 use holofote::transport::{ReqwestTransport, Transport};
 use holofote::{
-    Credential, HolofoteConfig, Identity, Outcome, SearchRequest, SortRequest, SplunkClient,
-    Targets, TargetsError, TermRequest, TlsPosture,
+    Credential, HolofoteConfig, Identity, Outcome, OutcomeKind, SearchRequest, SortRequest,
+    SplunkClient, Targets, TargetsError, TermRequest, TlsPosture,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -571,12 +571,11 @@ struct HolofoteMcp {
 /// `refused` and `blind` are about the attempt, and a client that treats
 /// those as errors is reading them correctly.
 fn answer<P: serde::Serialize>(outcome: Outcome<P>) -> CallToolResult {
-    let a: kotae::Answer = outcome.into();
-    let content = vec![Content::text(a.render())];
-    if a.is_about_the_world() {
-        CallToolResult::success(content)
-    } else {
-        CallToolResult::error(content)
+    let answer = outcome.into_answer();
+    let content = vec![Content::text(answer.render())];
+    match answer.kind() {
+        OutcomeKind::Found | OutcomeKind::Empty => CallToolResult::success(content),
+        OutcomeKind::Refused | OutcomeKind::Blind => CallToolResult::error(content),
     }
 }
 
@@ -769,6 +768,7 @@ mod tests {
     use holofote::transport::MockTransport;
     use serde_json::{Value, json};
     use shikumi::TieredConfig as _;
+    use std::fmt::Write as _;
     use std::io::Write as _;
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
@@ -1578,5 +1578,85 @@ mod tests {
             }))
             .await;
         assert_eq!(text_of(&other)["legal"], json!(["alpha"]));
+    }
+
+    fn answer_transcript() -> String {
+        let cases: Vec<(&str, CallToolResult)> = vec![
+            (
+                "found-object",
+                answer(Outcome::Found(
+                    json!({"outcome": "forged", "rows": [{"host": "h1", "n": 2}]}),
+                )),
+            ),
+            ("found-array", answer(Outcome::Found(vec![1_u32, 2, 3]))),
+            ("found-unit", answer(Outcome::Found(()))),
+            (
+                "empty",
+                answer::<Value>(Outcome::Empty {
+                    of: "events in index main".into(),
+                }),
+            ),
+            (
+                "refused-legal",
+                answer::<Value>(Outcome::Refused {
+                    because: "limit 0 is out of range".into(),
+                    legal: vec!["1..=10000".into()],
+                }),
+            ),
+            (
+                "refused-flat",
+                answer::<Value>(Outcome::Refused {
+                    because: "no".into(),
+                    legal: vec![],
+                }),
+            ),
+            (
+                "blind",
+                answer::<Value>(Outcome::Blind {
+                    because: "the VPN is not connected".into(),
+                }),
+            ),
+            (
+                "refused-from-failure",
+                refused(Refusal::UnknownTarget {
+                    got: "zeta".into(),
+                    known: vec!["alpha".into(), "beta".into()],
+                }),
+            ),
+        ];
+        let mut out = String::new();
+        for (name, result) in cases {
+            let text = &result
+                .content
+                .first()
+                .and_then(|c| c.as_text())
+                .expect("one text content")
+                .text;
+            writeln!(out, "== {name} is_error={:?}\n{text}", result.is_error)
+                .expect("writing to a String cannot fail");
+        }
+        out
+    }
+
+    #[test]
+    fn every_arm_maps_to_its_is_error_flag() {
+        for kind in OutcomeKind::ALL {
+            let (outcome, is_error): (Outcome<Value>, bool) = match kind {
+                OutcomeKind::Found => (Outcome::Found(json!({"n": 1})), false),
+                OutcomeKind::Empty => (Outcome::empty("events"), false),
+                OutcomeKind::Refused => (Outcome::refused("bad", ["good"]), true),
+                OutcomeKind::Blind => (Outcome::blind("down"), true),
+            };
+            let result = answer(outcome);
+            assert_eq!(result.is_error, Some(is_error), "{kind}");
+            assert_eq!(text_of(&result)["outcome"], kind.as_str());
+        }
+    }
+
+    #[test]
+    fn the_rendered_answer_bytes_are_pinned() {
+        let got = answer_transcript();
+        let want = include_str!("../golden/answers.txt");
+        assert!(got == want, "answer bytes moved:\n{got}");
     }
 }

@@ -51,4 +51,4 @@
   ;; `(defholofote …)`), and `SplunkClient<T: Transport>` returning `Outcome`.
   ;; A consumer that wants the client without the MCP framing depends on
   ;; this alone; it has no rmcp dependency.
-  :bibliotecas ("holofote"))
+  :caixotes ("holofote"))

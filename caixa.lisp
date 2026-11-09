@@ -39,9 +39,6 @@
   :deps ()
   :deps-dev ()
 
-  ;; The wired-up binary is what `feira publish` releases.
-  :exe ("holofote-mcp")
-
   ;; The downstream-consumable typed surface.
   ;;
   ;; holofote — the library: the `Transport` seam (reqwest impl + scripted
@@ -51,4 +48,4 @@
   ;; `(defholofote …)`), and `SplunkClient<T: Transport>` returning `Outcome`.
   ;; A consumer that wants the client without the MCP framing depends on
   ;; this alone; it has no rmcp dependency.
-  :caixotes ("holofote"))
+  :caixotes ("holofote-mcp" "holofote"))
